@@ -8,6 +8,57 @@
 
 > zapret2 — это не VPN, а anti-DPI утилита. Она не шифрует трафик и не меняет IP.
 
+## Запуск менеджера
+
+Подключитесь по **SSH** к роутеру и выполните команду:
+
+```
+wget -O /tmp/z2m-install.sh https://raw.githubusercontent.com/OWNER/z2m/main/install.sh && sh /tmp/z2m-install.sh
+```
+
+или, если в системе есть curl:
+
+```
+curl -fsSL -o /tmp/z2m-install.sh https://raw.githubusercontent.com/OWNER/z2m/main/install.sh && sh /tmp/z2m-install.sh
+```
+
+После установки менеджер запускается в SSH командой:
+
+```
+z2m
+```
+
+Установщик не использует `curl | sh`: скрипт сначала ложится в `/tmp`, его
+можно прочитать (`less /tmp/z2m-install.sh`) и только потом запустить. Скачанный
+`z2m` проверяется на шебанг и `sh -n` до того, как попасть в `/usr/bin`.
+
+<details>
+<summary>Альтернативные способы</summary>
+
+Без установщика, одним файлом:
+
+```
+wget -O /tmp/z2m https://raw.githubusercontent.com/OWNER/z2m/main/z2m
+sh /tmp/z2m install-self
+```
+
+Из клона репозитория (подхватит пресеты и списки из соседних папок):
+
+```
+cd /tmp && git clone https://github.com/OWNER/z2m && sh z2m/z2m install-self
+```
+
+Без интернета на роутере: скопируйте файл `z2m` через scp в `/tmp` и
+выполните `sh /tmp/z2m install-self`.
+
+Установка без вопросов (для своих скриптов):
+
+```
+Z2M_NO_LAUNCH=1 sh /tmp/z2m-install.sh
+```
+
+</details>
+
 ## Что умеет
 
 - Установка, обновление и откат на любую версию релиза
@@ -25,29 +76,6 @@
 - OpenWrt 21.02+ (основной сценарий — 23.05 / 24.10 с nftables; OpenWrt 25+ с apk тоже поддерживается)
 - ~5 МБ свободного места на overlay
 - `curl` и `unzip` — ставятся автоматически, если их нет
-
-## Установка
-
-Скачайте, прочитайте, потом запускайте — без `curl | sh`:
-
-```
-wget -O /tmp/install.sh https://raw.githubusercontent.com/OWNER/z2m/main/install.sh
-less /tmp/install.sh
-sh /tmp/install.sh
-```
-
-Или вручную из репозитория:
-
-```
-wget -O /tmp/z2m https://raw.githubusercontent.com/OWNER/z2m/main/z2m
-sh /tmp/z2m install-self
-```
-
-Дальше просто:
-
-```
-z2m
-```
 
 ## Быстрый старт
 
@@ -107,6 +135,11 @@ docs/STRATEGIES.md       синтаксис и разбор пресетов
 docs/TROUBLESHOOTING.md  частые проблемы
 docs/COMPAT.md           таблица протестированных устройств
 ```
+
+## Что заменить перед публикацией форка
+
+1. `OWNER` в этом README и в `install.sh` — на свой ник GitHub.
+2. `Z2M_SELF_REPO` в начале файла `z2m` — чтобы работало `z2m update-self`.
 
 ## Что стоит проверить на своём железе
 
