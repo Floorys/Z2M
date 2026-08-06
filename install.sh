@@ -2,22 +2,21 @@
 # z2m installer for OpenWrt.
 #
 # Запуск одной командой (busybox ash, работает и с wget, и с curl):
-#   wget -O /tmp/z2m-install.sh https://raw.githubusercontent.com/OWNER/z2m/main/install.sh && sh /tmp/z2m-install.sh
+#   wget -O /tmp/z2m-install.sh https://raw.githubusercontent.com/FunnyDragon2010/Z2M/main/install.sh && sh /tmp/z2m-install.sh
 #
 # После установки менеджер запускается командой:  z2m
 #
 # Переменные окружения:
-#   Z2M_REPO_OWNER  владелец репозитория (по умолчанию OWNER)
-#   Z2M_REPO_NAME   имя репозитория (по умолчанию z2m)
-#   Z2M_BRANCH      ветка (по умолчанию main)
-#   Z2M_NO_LAUNCH=1 не запускать меню после установки
+#   Z2M_REPO_OWNER   владелец репозитория
+#   Z2M_REPO_NAME    имя репозитория
+#   Z2M_BRANCH       ветка (по умолчанию main)
+#   Z2M_NO_LAUNCH=1  не запускать меню после установки
 
 set -eu
 
-OWNER="${Z2M_REPO_OWNER:-OWNER}"
-REPO="${Z2M_REPO_NAME:-z2m}"
+OWNER="${Z2M_REPO_OWNER:-FunnyDragon2010}"
+REPO="${Z2M_REPO_NAME:-Z2M}"
 BRANCH="${Z2M_BRANCH:-main}"
-BASE="https://raw.githubusercontent.com/$OWNER/$REPO/$BRANCH"
 
 CFGDIR="/etc/z2m"
 BIN="/usr/bin/z2m"
@@ -26,9 +25,14 @@ NO_LAUNCH="${Z2M_NO_LAUNCH:-0}"
 for a in "$@"; do
 	case "$a" in
 		--no-launch) NO_LAUNCH=1 ;;
-		--branch=*)  BRANCH="${a#--branch=}"; BASE="https://raw.githubusercontent.com/$OWNER/$REPO/$BRANCH" ;;
+		--branch=*)  BRANCH="${a#--branch=}" ;;
+		--owner=*)   OWNER="${a#--owner=}" ;;
+		--repo=*)    REPO="${a#--repo=}" ;;
 	esac
 done
+
+BASE="https://raw.githubusercontent.com/$OWNER/$REPO/$BRANCH"
+API="https://api.github.com/repos/$OWNER/$REPO/contents"
 
 if [ -t 1 ] && [ -z "${Z2M_NOCOLOR:-}" ]; then
 	C_G="\033[32m"; C_Y="\033[33m"; C_R="\033[31m"; C_B="\033[36m"; C_0="\033[0m"
@@ -43,7 +47,7 @@ die()  { say "${C_R}[x]${C_0} $*" >&2; exit 1; }
 
 say ""
 say "  ${C_B}z2m${C_0} — Zapret2 Manager for OpenWrt"
-say "  установщик"
+say "  установщик  ($OWNER/$REPO, ветка $BRANCH)"
 say ""
 
 [ "$(id -u)" = "0" ] || die "нужны права root"
@@ -57,8 +61,22 @@ else
 	die "нет ни curl, ни wget — поставьте один из них: opkg install curl"
 fi
 
+# Список файлов подкаталога берём через GitHub API, чтобы новые наборы
+# и пресеты подхватывались автоматически, без правки установщика.
+fetch_index() {
+	_dir="$1"; _ext="$2"; _json="/tmp/z2m-idx.json"
+	rm -f "$_json"
+	if dl "$_json" "$API/$_dir?ref=$BRANCH" 2>/dev/null && [ -s "$_json" ]; then
+		tr ',' '\n' <"$_json" \
+			| grep -o "\"name\"[[:space:]]*:[[:space:]]*\"[^\"]*$_ext\"" \
+			| sed 's/.*"\([^"]*\)"$/\1/' \
+			| sort -u || true
+	fi
+	rm -f "$_json"
+}
+
 # ---------- сам скрипт ----------
-info "скачиваю z2m из $OWNER/$REPO ($BRANCH)"
+info "скачиваю z2m"
 dl /tmp/z2m.new "$BASE/z2m" || die "не смог скачать $BASE/z2m"
 [ -s /tmp/z2m.new ] || die "скачался пустой файл"
 head -n1 /tmp/z2m.new | grep -q '^#!/bin/sh' || die "это не тот файл (нет шебанга) — проверьте ссылку"
@@ -78,16 +96,18 @@ else
 	ok "установлено: $NEWVER -> $BIN"
 fi
 
-# ---------- пресеты и списки ----------
+# ---------- пресеты стратегий ----------
+STRATS=$(fetch_index strategies '\.conf' || true)
+[ -n "$STRATS" ] || STRATS="z1-default.conf z2-autottl.conf z3-seqovl.conf z4-youtube.conf z5-http-fakedsplit.conf z6-quic.conf"
+
 info "качаю пресеты стратегий"
 SC=0
-for s in z1-default z2-autottl z3-seqovl z4-youtube z5-http-fakedsplit z6-quic; do
-	if dl "$CFGDIR/strategies/$s.conf.new" "$BASE/strategies/$s.conf" 2>/dev/null &&
-	   [ -s "$CFGDIR/strategies/$s.conf.new" ]; then
-		mv "$CFGDIR/strategies/$s.conf.new" "$CFGDIR/strategies/$s.conf"
+for s in $STRATS; do
+	if dl "$CFGDIR/strategies/$s.new" "$BASE/strategies/$s" 2>/dev/null && [ -s "$CFGDIR/strategies/$s.new" ]; then
+		mv "$CFGDIR/strategies/$s.new" "$CFGDIR/strategies/$s"
 		SC=$((SC+1))
 	else
-		rm -f "$CFGDIR/strategies/$s.conf.new"
+		rm -f "$CFGDIR/strategies/$s.new"
 	fi
 done
 if [ "$SC" -gt 0 ]; then
@@ -96,25 +116,33 @@ else
 	warn "пресеты не скачались — z2m создаст встроенные при первом запуске"
 fi
 
+# ---------- наборы доменов ----------
+LISTS=$(fetch_index lists '\.txt' || true)
+[ -n "$LISTS" ] || LISTS="google.txt discord.txt ai.txt social.txt torrent.txt zapret-hosts-user-exclude.txt"
+
 info "качаю наборы доменов"
 LC=0
-for l in youtube discord ai social torrent; do
-	if dl "$CFGDIR/lists/$l.txt.new" "$BASE/lists/$l.txt" 2>/dev/null &&
-	   [ -s "$CFGDIR/lists/$l.txt.new" ]; then
-		mv "$CFGDIR/lists/$l.txt.new" "$CFGDIR/lists/$l.txt"
+for l in $LISTS; do
+	if dl "$CFGDIR/lists/$l.new" "$BASE/lists/$l" 2>/dev/null && [ -s "$CFGDIR/lists/$l.new" ]; then
+		mv "$CFGDIR/lists/$l.new" "$CFGDIR/lists/$l"
 		LC=$((LC+1))
 	else
-		rm -f "$CFGDIR/lists/$l.txt.new"
+		rm -f "$CFGDIR/lists/$l.new"
 	fi
 done
-[ "$LC" -gt 0 ] && ok "наборов доменов: $LC" || warn "наборы доменов не скачались (не критично)"
+if [ "$LC" -gt 0 ]; then
+	ok "наборов доменов: $LC"
+else
+	warn "наборы доменов не скачались (не критично)"
+fi
 
 # ---------- итог ----------
 say ""
 ok "готово"
-say "    Запуск менеджера:  ${C_B}z2m${C_0}"
-say "    Справка:           ${C_B}z2m help${C_0}"
-say "    Обновить себя:     ${C_B}z2m update-self${C_0}"
+say "    Запуск менеджера:   ${C_B}z2m${C_0}"
+say "    Справка:            ${C_B}z2m help${C_0}"
+say "    Наборы доменов:    ${C_B}z2m list bundle${C_0}"
+say "    Исключения сразу:  ${C_B}z2m list sync-exclude${C_0}"
 say ""
 
 rm -f /tmp/z2m-install.sh 2>/dev/null || true

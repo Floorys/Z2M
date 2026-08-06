@@ -13,13 +13,13 @@
 Подключитесь по **SSH** к роутеру и выполните команду:
 
 ```
-wget -O /tmp/z2m-install.sh https://raw.githubusercontent.com/OWNER/z2m/main/install.sh && sh /tmp/z2m-install.sh
+wget -O /tmp/z2m-install.sh https://raw.githubusercontent.com/FunnyDragon2010/Z2M/main/install.sh && sh /tmp/z2m-install.sh
 ```
 
 или, если в системе есть curl:
 
 ```
-curl -fsSL -o /tmp/z2m-install.sh https://raw.githubusercontent.com/OWNER/z2m/main/install.sh && sh /tmp/z2m-install.sh
+curl -fsSL -o /tmp/z2m-install.sh https://raw.githubusercontent.com/FunnyDragon2010/Z2M/main/install.sh && sh /tmp/z2m-install.sh
 ```
 
 После установки менеджер запускается в SSH командой:
@@ -32,29 +32,32 @@ z2m
 можно прочитать (`less /tmp/z2m-install.sh`) и только потом запустить. Скачанный
 `z2m` проверяется на шебанг и `sh -n` до того, как попасть в `/usr/bin`.
 
+Обновление самого менеджера потом — одной командой `z2m update-self`.
+
 <details>
 <summary>Альтернативные способы</summary>
 
 Без установщика, одним файлом:
 
 ```
-wget -O /tmp/z2m https://raw.githubusercontent.com/OWNER/z2m/main/z2m
+wget -O /tmp/z2m https://raw.githubusercontent.com/FunnyDragon2010/Z2M/main/z2m
 sh /tmp/z2m install-self
 ```
 
 Из клона репозитория (подхватит пресеты и списки из соседних папок):
 
 ```
-cd /tmp && git clone https://github.com/OWNER/z2m && sh z2m/z2m install-self
+cd /tmp && git clone https://github.com/FunnyDragon2010/Z2M && sh Z2M/z2m install-self
 ```
 
 Без интернета на роутере: скопируйте файл `z2m` через scp в `/tmp` и
 выполните `sh /tmp/z2m install-self`.
 
-Установка без вопросов (для своих скриптов):
+Установка без вопросов (для своих скриптов) и из другой ветки:
 
 ```
 Z2M_NO_LAUNCH=1 sh /tmp/z2m-install.sh
+sh /tmp/z2m-install.sh --branch=dev
 ```
 
 </details>
@@ -66,7 +69,7 @@ Z2M_NO_LAUNCH=1 sh /tmp/z2m-install.sh
 - Проверка работоспособности бинарника сразу после установки
 - Пресеты стратегий под nfqws2 (`--lua-desync`), а не старые `--dpi-desync`
 - Автоподбор стратегии по списку доменов и обёртка над `blockcheck2.sh`
-- Работа с hostlist / hostlist-exclude и готовыми наборами доменов
+- Списки доменов: hostlist, hostlist-exclude и готовые наборы из `lists/`
 - Бэкап и восстановление конфига перед каждым изменением
 - Диагностика `z2m doctor`: конфликты, flow offloading, DNS, QUIC, правила firewall
 - Полноценный неинтерактивный режим — годится для cron и своих скриптов
@@ -80,12 +83,34 @@ Z2M_NO_LAUNCH=1 sh /tmp/z2m-install.sh
 ## Быстрый старт
 
 ```
-z2m install            # последний релиз zapret2 под свою архитектуру
-z2m strategy           # список пресетов
-z2m strategy z1-default
-z2m test               # автоподбор по списку доменов
-z2m doctor             # что не так
+z2m install              # последний релиз zapret2 под свою архитектуру
+z2m list sync-exclude    # залить исключения в hostlist-exclude
+z2m list bundle google   # добавить набор доменов в hostlist
+z2m strategy             # список пресетов
+z2m test                 # автоподбор по списку доменов
+z2m doctor               # что не так
 ```
+
+## Списки доменов
+
+В папке `lists/` лежат готовые наборы. Установщик кладёт их в `/etc/z2m/lists/`
+и подхватывает любые новые `.txt` автоматически — его не надо править
+при добавлении файла в репозиторий.
+
+Файлы со словом `exclude` в имени (например `zapret-hosts-user-exclude.txt`)
+считаются **исключениями** и льются в `hostlist-exclude`, остальные — в `hostlist`.
+
+```
+z2m list bundle                    # список наборов и куда каждый пойдёт
+z2m list bundle google             # по имени
+z2m list bundle 2                  # по номеру из списка
+z2m list bundle mylist exclude     # принудительно в исключения
+z2m list sync-exclude              # залить все exclude-наборы сразу
+```
+
+Зачем нужен exclude: всё, что туда попало, проходит мимо дурения. Это спасает
+банки, госуслуги, античиты и лаунчеры от случайных разрывов, особенно в
+режиме "дурить всё подряд" без hostlist.
 
 ## Команды
 
@@ -101,7 +126,9 @@ z2m doctor             # что не так
 | `z2m test` | прогнать все пресеты по доменам |
 | `z2m blockcheck` | штатный blockcheck2.sh с сохранением лога |
 | `z2m list add домен` | добавить домен в hostlist |
-| `z2m list bundle youtube` | добавить готовый набор |
+| `z2m list exclude add домен` | добавить домен в исключения |
+| `z2m list bundle [имя]` | наборы доменов |
+| `z2m list sync-exclude` | залить все exclude-наборы |
 | `z2m status` / `z2m doctor` | состояние и диагностика |
 | `z2m quic on\|off` | временно заблокировать UDP/443 |
 | `z2m backup` / `z2m restore` | бэкап и откат конфига |
@@ -112,6 +139,7 @@ z2m doctor             # что не так
 ## Важно перед стартом
 
 1. **zapret v1 и zapret2 одновременно не работают** — оба вешаются на nfqueue.
+   Достаточно `/etc/init.d/zapret stop && /etc/init.d/zapret disable`, удалять не обязательно.
 2. **Flow offloading** уводит трафик мимо nfqueue — выключите его.
 3. **Без DoH/DoT** часть блокировок не обходится в принципе.
 4. На части сборок `nfqws2` падает — менеджер это ловит и предлагает другую версию.
@@ -130,16 +158,20 @@ z2m doctor             # что не так
 z2m                      главный скрипт (ставится в /usr/bin/z2m)
 install.sh               однокомандный установщик
 strategies/*.conf        пресеты стратегий nfqws2
-lists/*.txt              наборы доменов
+lists/*.txt              наборы доменов (exclude в имени = исключения)
 docs/STRATEGIES.md       синтаксис и разбор пресетов
 docs/TROUBLESHOOTING.md  частые проблемы
 docs/COMPAT.md           таблица протестированных устройств
 ```
 
-## Что заменить перед публикацией форка
+## Форк и свой репозиторий
 
-1. `OWNER` в этом README и в `install.sh` — на свой ник GitHub.
-2. `Z2M_SELF_REPO` в начале файла `z2m` — чтобы работало `z2m update-self`.
+Подмените источник без правки кода:
+
+```
+Z2M_REPO_OWNER=вашник Z2M_REPO_NAME=Z2M sh /tmp/z2m-install.sh
+Z2M_SELF_REPO=вашник/Z2M z2m update-self
+```
 
 ## Что стоит проверить на своём железе
 
