@@ -1,8 +1,24 @@
 # Discord: текст, голос, CDN
+dis.gd
+discord-attachments-uploads-prd.storage.googleapis.com
+discord.app
+discord.co
 discord.com
-discordapp.com
-discordapp.net
+discord.design
+discord.dev
+discord.gift
+discord.gifts
 discord.gg
 discord.media
+discord.new
+discord.store
+discord.status
+discord-activities.com
+discordactivities.com
+discordapp.com
+discordapp.net
 discordcdn.com
-cloudflare.com
+discordmerch.com
+discordpartygames.coam
+discordsays.com
+discordsez.com
