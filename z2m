@@ -7,12 +7,16 @@
 
 set -u
 
-Z2M_VERSION="0.2.0"
+Z2M_VERSION="0.3.0"
 
 # ---------------------------------------------------------------- настройки --
 PKG_REPO="${Z2M_PKG_REPO:-remittor/zapret-openwrt}"   # откуда берём пакеты zapret2
 SELF_REPO="${Z2M_SELF_REPO:-FunnyDragon2010/Z2M}"                        # owner/repo самого z2m (для update-self)
 SELF_BRANCH="${Z2M_SELF_BRANCH:-main}"
+PKG_PREFIX="zapret2"                                  # префикс имён файлов в релизе
+PKG_TAG_RE="${Z2M_TAG_RE:-v0\.9\.[0-9]\{8\}}"           # как выглядят теги релизов zapret2
+FALLBACK_TAG="${Z2M_FALLBACK_TAG:-v0.9.20260307}"     # если GitHub не ответил списком версий
+GH_UA="z2m/$Z2M_VERSION"
 
 SELF_PATH="/usr/bin/z2m"
 CFGDIR="/etc/z2m"
@@ -126,14 +130,21 @@ pm_remove() {
 
 # ------------------------------------------------------------------ сеть ----
 dl_out() {
-	if have curl; then curl -fsSL --connect-timeout 10 "$1"
+	if have curl; then curl -fsSL -A "$GH_UA" --connect-timeout 10 --max-time 60 "$1"
 	elif have wget; then wget -q -O - "$1"
 	else return 1; fi
 }
 
 dl_file() {
-	if have curl; then curl -fL --connect-timeout 10 --progress-bar -o "$2" "$1"
+	if have curl; then curl -fL -A "$GH_UA" --connect-timeout 10 --progress-bar -o "$2" "$1"
 	elif have wget; then wget -q -O "$2" "$1"
+	else return 1; fi
+}
+
+# есть ли файл по ссылке (без скачивания)
+url_ok() {
+	if have curl; then curl -fsIL -A "$GH_UA" --connect-timeout 10 --max-time 25 -o /dev/null "$1"
+	elif have wget; then wget -q --spider "$1"
 	else return 1; fi
 }
 
@@ -230,11 +241,58 @@ restore_cfg() {
 }
 
 # ---------------------------------------------------------------- релизы ----
-list_assets() {
-	dl_out "https://api.github.com/repos/$PKG_REPO/releases?per_page=40" 2>/dev/null \
-		| grep -o '"browser_download_url": *"[^"]*"' \
-		| sed 's/.*"\(https[^"]*\)"/\1/' \
-		| grep "/zapret2_v[^/]*_${ARCH}\.zip$"
+# ----------------------------------------------------------------- релизы --
+# Имена файлов в релизах предсказуемы: zapret2_<тег>_<арх>.zip
+# Поэтому не тянем список релизов целиком через API (это мегабайты JSON и
+# быстрый упор в лимит GitHub), а собираем ссылку и проверяем её HEAD-запросом.
+
+arch_candidates() {
+	printf '%s\n' "$ARCH"
+	case "$ARCH" in
+		aarch64_generic) ;;
+		aarch64_*)       printf 'aarch64_generic\n' ;;
+	esac
+}
+
+asset_url() {
+	printf 'https://github.com/%s/releases/download/%s/%s_%s_%s.zip\n' \
+		"$PKG_REPO" "$1" "$PKG_PREFIX" "$1" "$2"
+}
+
+# какие сборки вообще есть в релизе $1
+tag_assets() {
+	dl_out "https://github.com/$PKG_REPO/releases/expanded_assets/$1" 2>/dev/null \
+		| grep -o "${PKG_PREFIX}_[A-Za-z0-9._-]*\.zip" | awk '!s[$0]++'
+}
+
+# теги релизов zapret2, свежие сверху; три источника, берём первый живой
+release_tags() {
+	for _src in atom tags api; do
+		case "$_src" in
+			atom) _raw=$(dl_out "https://github.com/$PKG_REPO/releases.atom" 2>/dev/null) ;;
+			tags) _raw=$(dl_out "https://github.com/$PKG_REPO/tags" 2>/dev/null) ;;
+			api)  _raw=$(dl_out "https://api.github.com/repos/$PKG_REPO/releases?per_page=15" 2>/dev/null) ;;
+		esac
+		_t=$(printf '%s' "${_raw:-}" | grep -o "$PKG_TAG_RE" | awk '!s[$0]++' | head -n 12)
+		if [ -n "$_t" ]; then printf '%s\n' "$_t"; return 0; fi
+	done
+	return 1
+}
+
+# ссылка на свежую сборку под нашу архитектуру
+find_asset() {
+	_tags=$(release_tags) || _tags=""
+	if [ -z "$_tags" ]; then
+		warn "GitHub не отдал список версий (лимит запросов или нет сети)"
+		_tags="$FALLBACK_TAG"
+	fi
+	for _t in $(printf '%s\n' "$_tags" | head -n 4); do
+		for _a in $(arch_candidates); do
+			_u=$(asset_url "$_t" "$_a")
+			if url_ok "$_u"; then printf '%s\n' "$_u"; return 0; fi
+		done
+	done
+	return 1
 }
 
 fetch_unpack() {
@@ -293,13 +351,34 @@ selftest() {
 }
 
 do_install() {
-	_url="${1:-}"
+	_arg="${1:-${Z2M_TAG:-}}"
 	ensure_tools
+	case "$_arg" in
+		http*) _url="$_arg" ;;
+		"")
+			info "ищу свежую сборку zapret2 для $ARCH"
+			_url=$(find_asset) || _url="" ;;
+		*)
+			_url=$(asset_url "$_arg" "$ARCH")
+			url_ok "$_url" || _url="" ;;
+	esac
 	if [ -z "$_url" ]; then
-		info "ищу последний релиз для $ARCH"
-		_url=$(list_assets | head -n1)
+		err "готовой сборки zapret2 для $ARCH не нашлось"
+		say ""
+		say "    Что можно сделать:"
+		say "      1. посмотреть релизы: https://github.com/$PKG_REPO/releases"
+		say "      2. скачать zapret2_<версия>_${ARCH}.zip и поставить: z2m local /tmp/файл.zip"
+		say "      3. вставить прямую ссылку прямо сейчас"
+		if [ -t 0 ] && [ "${Z2M_YES:-0}" != "1" ]; then
+			printf '\n  ссылка на zip (Enter — отмена): '
+			read -r _manual
+			[ -n "$_manual" ] || return 1
+			_url="$_manual"
+		else
+			return 1
+		fi
 	fi
-	[ -n "$_url" ] || die "не нашёл сборку zapret2 для архитектуры $ARCH"
+	ok "версия: $(basename "$_url")"
 	check_conflicts
 	backup_cfg
 	fetch_unpack "$_url"
@@ -308,24 +387,29 @@ do_install() {
 	ensure_strategies
 	selftest || return 1
 	"$INIT" enable >/dev/null 2>&1
-	ok "готово. Дальше: z2m strategy list, затем z2m test"
+	ok "zapret2 установлен и добавлен в автозапуск"
 }
 
 pick_version() {
 	ensure_tools
-	mkdir -p "$WORK"
-	list_assets >"$WORK/assets" 2>/dev/null
-	_n=$(wc -l <"$WORK/assets" 2>/dev/null || echo 0)
-	[ "$_n" -gt 0 ] || die "сборок для $ARCH не найдено"
+	info "получаю список версий"
+	_tags=$(release_tags) || _tags=""
+	[ -n "$_tags" ] || _tags="$FALLBACK_TAG"
 	say ""
-	say "  Сборки для ${C_B}$ARCH${C_0}:"
+	say "  Версии zapret2 (свежие сверху):"
 	_i=0
-	while read -r _u; do _i=$((_i+1)); printf '  %2d) %s\n' "$_i" "$(basename "$_u")"; done <"$WORK/assets"
+	for _t in $_tags; do _i=$((_i+1)); printf '   %2d) %s\n' "$_i" "$_t"; done
 	printf '\n  номер (Enter — отмена): '; read -r _k
 	[ -n "$_k" ] || return 0
-	_url=$(sed -n "${_k}p" "$WORK/assets")
-	[ -n "$_url" ] || die "неверный номер"
-	do_install "$_url"
+	_t=$(printf '%s\n' "$_tags" | sed -n "${_k}p")
+	[ -n "$_t" ] || { err "неверный номер"; return 1; }
+	_u=$(asset_url "$_t" "$ARCH")
+	if ! url_ok "$_u"; then
+		warn "в релизе $_t нет сборки для $ARCH. Что там есть:"
+		tag_assets "$_t" | sed 's/^/      /'
+		return 1
+	fi
+	do_install "$_u"
 }
 
 install_local() {
@@ -569,6 +653,7 @@ strat_apply() {
 	_ptcp=$(strat_meta "$_f" ports_tcp); [ -n "$_ptcp" ] && cfg_set NFQWS2_PORTS_TCP "$_ptcp"
 	_pudp=$(strat_meta "$_f" ports_udp); [ -n "$_pudp" ] && cfg_set NFQWS2_PORTS_UDP "$_pudp"
 	cfg_set NFQWS2_ENABLE 1
+	basename "$_f" .conf >"$CFGDIR/current" 2>/dev/null
 	svc_quiet restart_daemons
 	sleep 1
 	if daemon_running; then
@@ -921,64 +1006,93 @@ update_self() {
 }
 
 # ------------------------------------------------------------------ меню ---
-header() {
-	clear 2>/dev/null
-	_st="${C_D}не установлен${C_0}"
-	if installed; then
-		if daemon_running; then _st="${C_G}работает${C_0}"; else _st="${C_Y}остановлен${C_0}"; fi
+cur_strategy() { cat "$CFGDIR/current" 2>/dev/null; }
+
+state_line() {
+	if ! installed; then
+		say "  ${C_D}o${C_0}  zapret2 ещё не установлен"
+		say "  ${C_D}начните с пункта 1 — он всё сделает сам${C_0}"
+		return 0
 	fi
-	say ""
-	say "  ${C_B}z2m $Z2M_VERSION${C_0}  —  Zapret2 Manager for OpenWrt"
-	say "  ${C_D}$MODEL • OpenWrt $OWRT • $ARCH • $(pm_name) • $FW${C_0}"
-	say "  zapret2: $_st"
-	hr
+	if daemon_running; then
+		printf '  %s*%s  обход блокировок работает' "$C_G" "$C_0"
+	else
+		printf '  %s*%s  установлен, но выключен' "$C_Y" "$C_0"
+	fi
+	_cs=$(cur_strategy)
+	[ -n "$_cs" ] && printf '  %s· способ: %s%s' "$C_D" "$_cs" "$C_0"
+	printf '\n'
 }
 
-menu_install() {
-	while :; do
-		header
-		say "  ${C_B}Установка${C_0}"
-		say "   1) Установить / обновить до последнего релиза"
-		say "   2) Выбрать конкретную версию"
-		say "   3) Установить из локального zip"
-		say "   4) Удалить zapret2"
-		say "   5) Проверить бинарь (selftest)"
-		say "   0) Назад"
-		printf '\n  выбор: '; read -r c
-		case "$c" in
-			1) do_install; pause ;;
-			2) pick_version; pause ;;
-			3) install_local; pause ;;
-			4) do_uninstall; pause ;;
-			5) selftest; pause ;;
-			0|q|"") return 0 ;;
-		esac
-	done
+header() {
+	clear 2>/dev/null
+	say ""
+	say "  ${C_B}Z2M${C_0}  ${C_D}zapret2 для OpenWrt · v$Z2M_VERSION${C_0}"
+	say "  ${C_D}$MODEL · OpenWrt $OWRT · $ARCH${C_0}"
+	say ""
+	state_line
+	say ""
+}
+
+quick_setup() {
+	header
+	say "  ${C_B}Быстрая настройка${C_0}"
+	say "  ${C_D}4 шага. Где спрашиваю — Enter означает «нет».${C_0}"
+	say ""
+	if installed; then
+		ok "шаг 1/4 · zapret2 уже установлен"
+	else
+		say "  ${C_B}шаг 1/4${C_0} · ставлю zapret2"
+		if ! do_install; then pause; return 1; fi
+	fi
+	say ""
+	say "  ${C_B}шаг 2/4${C_0} · списки сайтов"
+	if ask "Залить готовые исключения (что трогать не нужно)?"; then
+		bundle_add_all
+	else
+		say "  ${C_D}пропустил${C_0}"
+	fi
+	say ""
+	say "  ${C_B}шаг 3/4${C_0} · способ обхода"
+	if ask "Подобрать автоматически? (проверю все варианты, 1-2 минуты)"; then
+		test_all
+	else
+		strat_apply z1-default
+	fi
+	say ""
+	say "  ${C_B}шаг 4/4${C_0} · автозапуск"
+	svc_quiet enable
+	ok "zapret2 будет включаться сам при старте роутера"
+	say ""
+	hr
+	status
+	say ""
+	say "  ${C_D}Если что-то из сайтов не открывается — пункт 2, «Подобрать автоматически».${C_0}"
+	pause
 }
 
 menu_strategy() {
 	while :; do
 		header
-		say "  ${C_B}Стратегии${C_0}"
-		say "   1) Список пресетов"
-		say "   2) Применить пресет"
-		say "   3) Показать пресет"
-		say "   4) Текущая стратегия (status)"
-		say "   5) Редактировать вручную"
-		say "   6) Сохранить текущую как пресет"
-		say "   7) Автотест всех пресетов"
-		say "   8) blockcheck2 (штатный подборщик)"
+		say "  ${C_B}Способ обхода${C_0}"
+		say ""
+		say "   1) Подобрать автоматически"
+		say "   2) Выбрать из списка вручную"
+		say "   3) Что применено сейчас"
+		say "   4) Показать, что делает вариант"
+		say "   5) Глубокий подбор (blockcheck2, долго)"
+		say "   6) Правка строки вручную"
+		say "   7) Сохранить текущее как свой вариант"
 		say "   0) Назад"
 		printf '\n  выбор: '; read -r c
 		case "$c" in
-			1) strat_list; pause ;;
-			2) strat_list; printf '\n  номер или имя: '; read -r s; [ -n "$s" ] && strat_apply "$s"; pause ;;
-			3) strat_list; printf '\n  номер или имя: '; read -r s; [ -n "$s" ] && strat_show "$s"; pause ;;
-			4) status; pause ;;
-			5) strat_edit; pause ;;
-			6) printf '  имя пресета: '; read -r s; strat_save "$s"; pause ;;
-			7) test_all; pause ;;
-			8) blockcheck; pause ;;
+			1) test_all; pause ;;
+			2) strat_list; printf '\n  номер или имя: '; read -r x; [ -n "$x" ] && strat_apply "$x"; pause ;;
+			3) status; pause ;;
+			4) strat_list; printf '\n  номер или имя: '; read -r x; [ -n "$x" ] && strat_show "$x"; pause ;;
+			5) blockcheck; pause ;;
+			6) strat_edit; pause ;;
+			7) printf '  имя: '; read -r x; strat_save "$x"; pause ;;
 			0|q|"") return 0 ;;
 		esac
 	done
@@ -987,28 +1101,28 @@ menu_strategy() {
 menu_lists() {
 	while :; do
 		header
-		say "  ${C_B}Списки доменов${C_0}"
-		say "   1) Показать hostlist"
-		say "   2) Добавить домен в hostlist"
-		say "   3) Удалить домен из hostlist"
-		say "   4) Показать hostlist-exclude"
-		say "   5) Добавить домен в exclude"
+		say "  ${C_B}Сайты${C_0}"
+		say "  ${C_D}список = кого обходим, исключения = кого не трогаем${C_0}"
+		say ""
+		say "   1) Показать список сайтов"
+		say "   2) Добавить сайт"
+		say "   3) Убрать сайт"
+		say "   4) Показать исключения"
+		say "   5) Добавить в исключения"
 		say "   6) Готовые наборы"
-		say "   7) Добавить набор в hostlist"
-		say "   8) Добавить набор в exclude"
-		say "   9) Залить все exclude-наборы сразу"
+		say "   7) Залить набор"
+		say "   8) Залить все исключения разом"
 		say "   0) Назад"
 		printf '\n  выбор: '; read -r c
 		case "$c" in
 			1) hl_show user; pause ;;
-			2) printf '  домен(ы) через пробел: '; read -r d; [ -n "$d" ] && hl_add user $d; pause ;;
-			3) printf '  домен(ы) через пробел: '; read -r d; [ -n "$d" ] && hl_del user $d; pause ;;
+			2) printf '  сайт(ы) через пробел: '; read -r d; [ -n "$d" ] && hl_add user $d; pause ;;
+			3) printf '  сайт(ы) через пробел: '; read -r d; [ -n "$d" ] && hl_del user $d; pause ;;
 			4) hl_show exclude; pause ;;
-			5) printf '  домен(ы) через пробел: '; read -r d; [ -n "$d" ] && hl_add exclude $d; pause ;;
+			5) printf '  сайт(ы) через пробел: '; read -r d; [ -n "$d" ] && hl_add exclude $d; pause ;;
 			6) bundle_list; pause ;;
-			7) bundle_list; printf '\n  имя набора: '; read -r b; [ -n "$b" ] && bundle_add "$b" hostlist; pause ;;
-			8) bundle_list; printf '  имя или номер набора: '; read -r b; [ -n "$b" ] && bundle_add "$b" exclude; pause ;;
-			9) bundle_add_all; pause ;;
+			7) bundle_list; printf '\n  имя или номер: '; read -r b; [ -n "$b" ] && bundle_add "$b"; pause ;;
+			8) bundle_add_all; pause ;;
 			0|q|"") return 0 ;;
 		esac
 	done
@@ -1017,29 +1131,29 @@ menu_lists() {
 menu_service() {
 	while :; do
 		header
-		say "  ${C_B}Сервис и диагностика${C_0}"
-		say "   1) Статус"
-		say "   2) Диагностика (doctor)"
-		say "   3) Логи nfqws2"
-		say "   4) Правила firewall (list_table)"
-		say "   5) Проверка конфликтов"
-		say "   s) Start    t) Stop"
-		say "   r) Restart демонов    R) Полный restart"
-		say "   e) Автозапуск вкл     d) Автозапуск выкл"
+		say "  ${C_B}Проверка и управление${C_0}"
+		say ""
+		if daemon_running; then
+			say "   1) Выключить обход"
+		else
+			say "   1) Включить обход"
+		fi
+		say "   2) Перезапустить"
+		say "   3) Состояние"
+		say "   4) Диагностика — найти проблемы"
+		say "   5) Логи"
+		say "   6) Автозапуск: включить"
+		say "   7) Автозапуск: выключить"
 		say "   0) Назад"
 		printf '\n  выбор: '; read -r c
 		case "$c" in
-			1) status; pause ;;
-			2) doctor; pause ;;
-			3) logread -e nfqws2 2>/dev/null | tail -n 40 | sed 's/^/    /'; pause ;;
-			4) svc list_table; pause ;;
-			5) check_conflicts; pause ;;
-			s|S) svc start; pause ;;
-			t|T) svc stop; pause ;;
-			r) svc restart_daemons; pause ;;
-			R) svc restart; pause ;;
-			e) svc enable; ok "автозапуск включён"; pause ;;
-			d) svc disable; ok "автозапуск выключен"; pause ;;
+			1) if daemon_running; then svc stop; else svc start; fi; pause ;;
+			2) svc restart; pause ;;
+			3) status; pause ;;
+			4) doctor; pause ;;
+			5) logread -e nfqws2 2>/dev/null | tail -n 40 | sed 's/^/    /'; pause ;;
+			6) svc enable; ok "автозапуск включён"; pause ;;
+			7) svc disable; ok "автозапуск выключен"; pause ;;
 			0|q|"") return 0 ;;
 		esac
 	done
@@ -1048,26 +1162,32 @@ menu_service() {
 menu_system() {
 	while :; do
 		header
-		say "  ${C_B}Система${C_0}"
-		say "   1) Блокировка QUIC — включить"
-		say "   2) Блокировка QUIC — выключить"
-		say "   3) IPv6 в zapret2 — включить"
-		say "   4) IPv6 в zapret2 — выключить"
-		say "   5) Бэкап конфигов"
-		say "   6) Восстановить из бэкапа"
-		say "   7) Редактировать конфиг zapret2"
-		say "   8) Обновить сам z2m"
+		say "  ${C_B}Дополнительно${C_0}"
+		say ""
+		say "   1) Обновить zapret2 до свежей версии"
+		say "   2) Поставить конкретную версию"
+		say "   3) Поставить из локального zip"
+		say "   4) Удалить zapret2"
+		say "   5) Блокировка QUIC"
+		say "   6) IPv6"
+		say "   7) Бэкап конфига"
+		say "   8) Правка конфига zapret2"
+		say "   9) Обновить сам Z2M"
 		say "   0) Назад"
 		printf '\n  выбор: '; read -r c
 		case "$c" in
-			1) quic_on; pause ;;
-			2) quic_off; pause ;;
-			3) ipv6_set on; pause ;;
-			4) ipv6_set off; pause ;;
-			5) backup_cfg; pause ;;
-			6) restore_cfg; pause ;;
-			7) detect_cfg; cfg_edit; pause ;;
-			8) update_self; pause ;;
+			1) do_install; pause ;;
+			2) pick_version; pause ;;
+			3) install_local; pause ;;
+			4) do_uninstall; pause ;;
+			5) quic_status; printf '\n  1) включить  2) выключить  Enter — назад: '; read -r x
+			   case "$x" in 1) quic_on ;; 2) quic_off ;; esac; pause ;;
+			6) printf '  1) включить IPv6  2) выключить  Enter — назад: '; read -r x
+			   case "$x" in 1) ipv6_set on ;; 2) ipv6_set off ;; esac; pause ;;
+			7) printf '  1) сделать бэкап  2) восстановить  Enter — назад: '; read -r x
+			   case "$x" in 1) backup_cfg ;; 2) restore_cfg ;; esac; pause ;;
+			8) detect_cfg; cfg_edit; pause ;;
+			9) update_self; pause ;;
 			0|q|"") return 0 ;;
 		esac
 	done
@@ -1076,22 +1196,19 @@ menu_system() {
 main_menu() {
 	while :; do
 		header
-		say "   1) Установка и обновление"
-		say "   2) Стратегии и автоподбор"
-		say "   3) Списки доменов"
-		say "   4) Сервис и диагностика"
-		say "   5) Система"
-		say ""
-		say "   s) Start/Stop zapret2"
+		say "   1) Быстрая настройка — сделать всё за один раз"
+		say "   2) Способ обхода"
+		say "   3) Сайты и исключения"
+		say "   4) Проверка и управление"
+		say "   5) Дополнительно"
 		say "   0) Выход"
 		printf '\n  выбор: '; read -r c
 		case "$c" in
-			1) menu_install ;;
+			1) quick_setup ;;
 			2) menu_strategy ;;
 			3) menu_lists ;;
 			4) menu_service ;;
 			5) menu_system ;;
-			s|S) if daemon_running; then svc stop; else svc start; fi; pause ;;
 			0|q|"") clear 2>/dev/null; exit 0 ;;
 		esac
 	done
@@ -1104,7 +1221,8 @@ z2m $Z2M_VERSION — Zapret2 Manager for OpenWrt
 Без аргументов запускается интерактивное меню.
 
 Установка
-  z2m install [url]        установить/обновить zapret2 (последний релиз)
+  z2m install              установить/обновить до свежего релиза
+  z2m install <тег|url>    конкретная версия, напр. v0.9.20260307
   z2m pick                 выбрать конкретную версию релиза
   z2m local [file.zip]     установить из локального zip
   z2m uninstall            удалить zapret2
@@ -1143,6 +1261,8 @@ z2m $Z2M_VERSION — Zapret2 Manager for OpenWrt
 Переменные окружения
   Z2M_YES=1        не задавать вопросов
   Z2M_ARCH=...     переопределить архитектуру
+  Z2M_TAG=v0.9...  ставить конкретную версию
+  Z2M_FALLBACK_TAG=v0.9.20260307   запасная версия, если GitHub молчит
   Z2M_TIMEOUT=7    таймаут одного домена в тесте
   Z2M_SETTLE=3     пауза после применения стратегии
   Z2M_NOCOLOR=1    без цвета
@@ -1164,6 +1284,7 @@ cmd="${1:-}"
 
 case "$cmd" in
 	"")               ensure_strategies; main_menu ;;
+	setup|wizard)     ensure_strategies; quick_setup ;;
 	install|update)   Z2M_BATCH=1; detect_cfg; do_install "${1:-}" ;;
 	pick)             detect_cfg; pick_version ;;
 	local)            Z2M_BATCH=1; detect_cfg; install_local "${1:-}" ;;
