@@ -7,7 +7,7 @@
 
 set -u
 
-Z2M_VERSION="0.4.0"
+Z2M_VERSION="0.4.1"
 
 # ---------------------------------------------------------------- настройки --
 PKG_REPO="${Z2M_PKG_REPO:-remittor/zapret-openwrt}"   # откуда берём пакеты zapret2
@@ -31,6 +31,7 @@ RESULTS="$CFGDIR/test-results.txt"
 DOMAINS_FILE="$CFGDIR/test-domains.txt"
 LOGF="$CFGDIR/z2m.log"
 WORK="/tmp/z2m"
+PROBE_FAIL="/tmp/z2m/probe.fail"
 
 INIT="/etc/init.d/zapret2"
 ZDIR="/opt/zapret2"
@@ -40,8 +41,11 @@ UCI_FILE="/etc/config/zapret2"
 HOSTS_USER="$ZDIR/ipset/zapret-hosts-user.txt"
 HOSTS_EXCL="$ZDIR/ipset/zapret-hosts-user-exclude.txt"
 
-TEST_SETTLE="${Z2M_SETTLE:-3}"     # сек после применения стратегии
-TEST_TIMEOUT="${Z2M_TIMEOUT:-7}"   # сек на один домен
+TEST_SETTLE="${Z2M_SETTLE:-1}"     # сек после применения стратегии
+TEST_TIMEOUT="${Z2M_TIMEOUT:-5}"   # сек на один домен
+TEST_CONNECT="${Z2M_CONNECT:-3}"   # сек на установку соединения
+TEST_JOBS="${Z2M_JOBS:-8}"         # сколько доменов проверять одновременно
+TEST_MAX_TARGETS="${Z2M_TARGETS:-6}" # сколько заблокированных сайтов брать в тест
 
 # ------------------------------------------------------------------- вывод --
 if [ -t 1 ] && [ "${Z2M_NOCOLOR:-0}" != "1" ]; then
@@ -919,6 +923,9 @@ ipv6_set() {
 }
 
 # ------------------------------------------------------------- автотестер --
+# Проверка идёт параллельно и только по тем сайтам, которые реально
+# заблокированы без обхода. Способ, который открыл всё, останавливает перебор.
+
 default_domains() {
 	cat <<'EOF'
 www.youtube.com
@@ -936,29 +943,52 @@ load_domains() {
 	grep -v '^[[:space:]]*#' "$DOMAINS_FILE" | sed '/^[[:space:]]*$/d'
 }
 
-probe() {
-	_r=$(curl -sS -o /dev/null -m "$TEST_TIMEOUT" -w '%{http_code} %{time_total}' "https://$1/" 2>/dev/null)
+probe_one() {
+	_r=$(curl -sS -o /dev/null -r 0-0 --connect-timeout "$TEST_CONNECT" -m "$TEST_TIMEOUT" \
+		-w '%{http_code} %{time_total}' "https://$1/" 2>/dev/null)
 	_code=$(printf '%s' "$_r" | awk '{print $1}')
-	_t=$(printf '%s' "$_r" | awk '{printf "%d", $2*1000}')
+	_ms=$(printf '%s' "$_r" | awk '{printf "%d", $2*1000}')
 	case "$_code" in
-		2*|3*|4*) printf '1 %s' "${_t:-0}" ;;
-		*)        printf '0 0' ;;
+		2*|3*|4*) printf '1 %s %s\n' "${_ms:-0}" "$1" ;;
+		*)        printf '0 0 %s\n' "$1" ;;
 	esac
 }
 
+# stdout: "<открылось> <всего> <среднее ms>", детали в stderr,
+# список неоткрывшихся — в файле $PROBE_FAIL (вызов часто идёт в подоболочке)
 run_probes() {
-	_ok=0; _all=0; _sum=0
-	for _d in $(load_domains); do
+	_list="$*"
+	[ -n "$_list" ] || _list=$(load_domains)
+	mkdir -p "$WORK"
+	_pdir="$WORK/probe"; rm -rf "$_pdir"; mkdir -p "$_pdir"
+	: >"$PROBE_FAIL"
+	_n=0
+	for _d in $_list; do
+		_n=$((_n+1))
+		probe_one "$_d" >"$_pdir/r$_n" 2>/dev/null &
+		if [ $((_n % TEST_JOBS)) -eq 0 ]; then wait; fi
+	done
+	wait
+	_ok=0; _all=0; _sum=0; _i=0
+	while [ "$_i" -lt "$_n" ]; do
+		_i=$((_i+1))
+		[ -s "$_pdir/r$_i" ] || continue
+		read -r _s _ms _dom <"$_pdir/r$_i"
+		[ -n "${_dom:-}" ] || continue
 		_all=$((_all+1))
-		# shellcheck disable=SC2046
-		set -- $(probe "$_d")
-		if [ "$1" = "1" ]; then
-			_ok=$((_ok+1)); _sum=$((_sum+$2))
-			printf '      %sOK%s   %-42s %s ms\n' "$C_G" "$C_0" "$_d" "$2" >&2
+		if [ "$_s" = "1" ]; then
+			_ok=$((_ok+1)); _sum=$((_sum+_ms))
+			if [ "${PROBE_QUIET:-0}" != "1" ]; then
+				printf '      %sОК%s    %s  %s%s ms%s\n' "$C_G" "$C_0" "$_dom" "$C_D" "$_ms" "$C_0" >&2
+			fi
 		else
-			printf '      %sFAIL%s %-42s -\n' "$C_R" "$C_0" "$_d" >&2
+			printf '%s\n' "$_dom" >>"$PROBE_FAIL"
+			if [ "${PROBE_QUIET:-0}" != "1" ]; then
+				printf '      %sнет%s   %s\n' "$C_R" "$C_0" "$_dom" >&2
+			fi
 		fi
 	done
+	rm -rf "$_pdir"
 	_avg=0; [ "$_ok" -gt 0 ] && _avg=$((_sum/_ok))
 	printf '%s %s %s' "$_ok" "$_all" "$_avg"
 }
@@ -969,28 +999,42 @@ test_all() {
 	ensure_strategies
 	detect_cfg
 	[ "$CFG_MODE" = none ] && die "конфиг zapret2 не найден"
-
-	info "сохраняю текущую конфигурацию"
-	backup_cfg
+	mkdir -p "$WORK"
+	backup_cfg >/dev/null 2>&1
 	_saved=$(cfg_get NFQWS2_OPT 2>/dev/null)
 	: >"$RESULTS"
 
 	say ""
-	info "базовая проверка — zapret2 остановлен"
-	svc_quiet stop_daemons; sleep 1
+	info "шаг 1 · смотрю, что заблокировано без обхода"
+	svc_quiet stop_daemons
 	# shellcheck disable=SC2046
 	set -- $(run_probes)
-	_base=$1
-	printf '%3d/%-3d %6s ms  %s\n' "$1" "$2" "$3" "baseline (без обхода)" >>"$RESULTS"
+	_base_ok=$1; _base_all=$2
+	_targets=$(head -n "$TEST_MAX_TARGETS" "$PROBE_FAIL" 2>/dev/null | tr '\n' ' ')
+	if [ -z "$_targets" ]; then
+		say ""
+		ok "без обхода открылись все $_base_all сайта — подбирать нечего"
+		say "  ${C_D}если у вас не открываются другие сайты — впишите их в $DOMAINS_FILE${C_0}"
+		[ -n "${_saved:-}" ] && cfg_set NFQWS2_OPT "$_saved"
+		svc_quiet restart_daemons
+		return 0
+	fi
+	set -- $_targets; _ntarget=$#
+	_nstrat=0
+	for _f in "$STRAT_DIR"/*.conf; do [ -f "$_f" ] && _nstrat=$((_nstrat+1)); done
+	_eta=$(( _nstrat * (TEST_SETTLE + TEST_TIMEOUT + 1) ))
 
+	say ""
+	info "шаг 2 · $_nstrat способов на $_ntarget сайтах, это до ~$_eta сек"
+	say "  ${C_D}проверяю: $_targets${C_0}"
+	say ""
+
+	_best=""; _bestscore=-1; _bestavg=0
 	for _f in "$STRAT_DIR"/*.conf; do
 		[ -f "$_f" ] || continue
 		_id=$(basename "$_f" .conf)
-		_nm=$(strat_meta "$_f" name); [ -n "$_nm" ] || _nm="$_id"
-		say ""
-		info "проверяю: $_nm"
 		_opt=$(strat_opt "$_f")
-		if [ -z "$_opt" ]; then warn "пустой пресет, пропускаю"; continue; fi
+		[ -n "$_opt" ] || continue
 		cfg_set NFQWS2_OPT "$_opt"
 		_p=$(strat_meta "$_f" ports_tcp); [ -n "$_p" ] && cfg_set NFQWS2_PORTS_TCP "$_p"
 		_p=$(strat_meta "$_f" ports_udp); [ -n "$_p" ] && cfg_set NFQWS2_PORTS_UDP "$_p"
@@ -998,29 +1042,44 @@ test_all() {
 		svc_quiet restart_daemons
 		sleep "$TEST_SETTLE"
 		if ! daemon_running; then
-			err "демон не поднялся — ошибка синтаксиса в пресете"
-			logread -e nfqws2 2>/dev/null | tail -n 3 | sed 's/^/        /'
-			printf '%3s/%-3s %6s     %s\n' "-" "-" "FAIL" "$_id" >>"$RESULTS"
+			printf '    %s%-18s%s %sошибка в строке способа%s\n' "$C_R" "$_id" "$C_0" "$C_D" "$C_0"
+			printf '%3s/%-3s %6s     %s\n' "0" "$_ntarget" "FAIL" "$_id" >>"$RESULTS"
 			continue
 		fi
+		PROBE_QUIET=1
 		# shellcheck disable=SC2046
-		set -- $(run_probes)
-		printf '%3d/%-3d %6s ms  %s\n' "$1" "$2" "$3" "$_id" >>"$RESULTS"
+		set -- $(run_probes $_targets)
+		PROBE_QUIET=0
+		_sc=$1; _avg=$3
+		if [ "$_sc" -ge "$_ntarget" ]; then
+			printf '    %s%-18s%s %s%s/%s%s  %s%s ms%s\n' "$C_G" "$_id" "$C_0" "$C_G" "$_sc" "$_ntarget" "$C_0" "$C_D" "$_avg" "$C_0"
+		elif [ "$_sc" -gt 0 ]; then
+			printf '    %-18s %s%s/%s%s  %s%s ms%s\n' "$_id" "$C_Y" "$_sc" "$_ntarget" "$C_0" "$C_D" "$_avg" "$C_0"
+		else
+			printf '    %s%-18s%s %s0/%s%s\n' "$C_D" "$_id" "$C_0" "$C_D" "$_ntarget" "$C_0"
+		fi
+		printf '%3d/%-3d %6s ms  %s\n' "$_sc" "$_ntarget" "$_avg" "$_id" >>"$RESULTS"
+		if [ "$_sc" -gt "$_bestscore" ]; then _bestscore=$_sc; _best=$_id; _bestavg=$_avg; fi
+		if [ "$_sc" -ge "$_ntarget" ] && [ "${Z2M_FULL:-0}" != "1" ]; then
+			say ""
+			ok "этот способ открыл всё — остальные не проверяю"
+			break
+		fi
 	done
 
 	say ""
-	info "возвращаю исходную стратегию"
-	[ -n "${_saved:-}" ] && cfg_set NFQWS2_OPT "$_saved"
-	svc_quiet restart_daemons
-
+	if [ -n "$_best" ] && [ "$_bestscore" -gt 0 ]; then
+		strat_apply "$_best" >/dev/null 2>&1
+		ok "оставил способ $_best — открыл $_bestscore из $_ntarget сайтов"
+	else
+		warn "ни один способ не помог — вернул как было"
+		say "  ${C_D}попробуйте глубокий подбор (blockcheck2) в меню «Обход блокировок»${C_0}"
+		[ -n "${_saved:-}" ] && cfg_set NFQWS2_OPT "$_saved"
+		svc_quiet restart_daemons
+	fi
 	say ""
-	say "  ${C_B}Результаты${C_0} (сохранены в $RESULTS)"
-	hr
-	sort -rn "$RESULTS" | sed 's/^/    /'
-	hr
-	say "  Без обхода работало $_base доменов — сравнивайте с этим числом."
-	say "  Применить победителя: ${C_B}z2m strategy <имя>${C_0}"
-	log "test finished"
+	say "  ${C_D}все результаты: $RESULTS · полный перебор: Z2M_FULL=1 z2m test${C_0}"
+	log "test best=$_best score=$_bestscore/$_ntarget"
 }
 
 blockcheck() {
@@ -1135,7 +1194,7 @@ quick_setup() {
 	fi
 	say ""
 	say "  ${C_B}3/4${C_0} · способ обхода"
-	if ask "Подобрать автоматически? (1-2 минуты)"; then
+	if ask "Подобрать автоматически? (около минуты)"; then
 		test_all
 	else
 		strat_apply z1-default
@@ -1154,7 +1213,7 @@ menu_strategy() {
 		header
 		crumb "Обход блокировок"
 		mi 1 "Подобрать автоматически"
-		msub "прогоню все варианты по списку сайтов"
+		msub "проверю только заблокированные сайты и сразу применю лучший"
 		say ""
 		mi 2 "Выбрать вручную"
 		mi 3 "Что применено сейчас"
@@ -1350,8 +1409,12 @@ z2m $Z2M_VERSION — Zapret2 Manager for OpenWrt
   Z2M_ARCH=...     переопределить архитектуру
   Z2M_TAG=v0.9...  ставить конкретную версию
   Z2M_FALLBACK_TAG=v0.9.20260307   запасная версия, если GitHub молчит
-  Z2M_TIMEOUT=7    таймаут одного домена в тесте
-  Z2M_SETTLE=3     пауза после применения стратегии
+  Z2M_TIMEOUT=5    таймаут одного домена в тесте
+  Z2M_CONNECT=3    таймаут соединения
+  Z2M_SETTLE=1     пауза после применения способа
+  Z2M_JOBS=8       сколько сайтов проверять одновременно
+  Z2M_TARGETS=6    сколько заблокированных сайтов брать в подбор
+  Z2M_FULL=1       проверить все способы, без остановки на первом удачном
   Z2M_NOCOLOR=1    без цвета
   Z2M_ASCII=1      рамки из обычных символов
   Z2M_MIRRORS=...  свои зеркала github через пробел
