@@ -1,6 +1,9 @@
 #!/bin/sh
 # Zapret2 Manager for OpenWrt (Routerich zapret2 / nfqws2)
-Z2M_VER="0.1.0"
+Z2M_VER="0.2.0"
+Z2M_REPO="${Z2M_REPO:-YOURNICK/zapret2-manager}"
+Z2M_BRANCH="${Z2M_BRANCH:-main}"
+Z2M_RAW="https://raw.githubusercontent.com/$Z2M_REPO/$Z2M_BRANCH"
 D=/opt/z2m; S=$D/strategies; BAK=/root/z2m.bak; CFG=/opt/zapret2/config
 NFQ=/opt/zapret2/nfq2/nfqws2
 LUA="--lua-init=@/opt/zapret2/lua/zapret-lib.lua --lua-init=@/opt/zapret2/lua/zapret-antidpi.lua --lua-init=@/opt/zapret2/lua/zapret-auto.lua"
@@ -135,14 +138,22 @@ m_bak(){ hdr
    4) uci export zapret2 > /root/zapret2.export; m "${G}готово${N}";;
    *) return;; esac; pause; }
 
+self_update(){
+  m "${C}обновление из $Z2M_REPO ($Z2M_BRANCH)${N}"
+  if command -v curl >/dev/null 2>&1; then curl -fsSL "$Z2M_RAW/install.sh" -o /tmp/z2m.install
+  else wget -q -O /tmp/z2m.install "$Z2M_RAW/install.sh"; fi
+  [ -s /tmp/z2m.install ] || { m "${R}не скачался install.sh${N}"; return 1; }
+  Z2M_REPO="$Z2M_REPO" Z2M_BRANCH="$Z2M_BRANCH" sh /tmp/z2m.install --remote; }
+
 m_sys(){ hdr
   m " 1) старт zapret2"
   m " 2) стоп zapret2"
   m " 3) рестарт zapret2"
   m " 4) автозапуск вкл"
   m " 5) FIX: выключить flow offloading"
-  m " 6) показать версии"
-  m " 7) удалить менеджер"
+  m " 6) обновить z2m с GitHub"
+  m " 7) показать версии"
+  m " 8) удалить менеджер"
   m " 0) назад"; printf "выбор: "; read a
   case "$a" in 1) service zapret2 start;; 2) service zapret2 stop;; 3) service zapret2 restart;;
    4) service zapret2 enable; m "${G}включён${N}";;
@@ -150,9 +161,28 @@ m_sys(){ hdr
       uci -q set firewall.@defaults[0].flow_offloading=0
       uci -q set firewall.@defaults[0].flow_offloading_hw=0
       uci commit; service firewall restart; service zapret2 restart; m "${G}готово${N}";;
-   6) m "z2m $Z2M_VER"; $NFQ --version | head -3; . /etc/openwrt_release 2>/dev/null; m "$DISTRIB_DESCRIPTION";;
-   7) rm -rf /opt/z2m /usr/bin/z2m; m "${Y}удалено${N}"; exit 0;;
+   6) self_update;;
+   7) m "z2m $Z2M_VER ($Z2M_REPO)"; $NFQ --version | head -3; . /etc/openwrt_release 2>/dev/null; m "$DISTRIB_DESCRIPTION";;
+   8) rm -rf /opt/z2m /usr/bin/z2m; m "${Y}удалено${N}"; exit 0;;
    *) return;; esac; pause; }
+
+# ---------- быстрые команды без меню ----------
+case "$1" in
+  update) self_update; exit $?;;
+  apply)  [ -f "$2" ] || { m "${R}файл не найден: $2${N}"; exit 1; }
+          if apply "$2"; then m "${G}демон работает${N}"; chk; exit 0
+          else m "${R}не запустилась:${N}"; why; rollback; exit 1; fi;;
+  test)   gen "$2"; cat /tmp/z2m.uci; exit 0;;
+  back)   rollback; exit $?;;
+  st)     hdr; ps w | grep '[n]fqws2'; cat /proc/net/netfilter/nfnetlink_queue 2>/dev/null; exit 0;;
+  -h|--help|help)
+          m "z2m                 - меню"
+          m "z2m apply <файл>    - применить стратегию Zapret2UI"
+          m "z2m test  <файл>    - показать будущие UCI-команды"
+          m "z2m back            - откат к последнему бэкапу"
+          m "z2m st              - короткий статус"
+          m "z2m update          - обновить с GitHub"; exit 0;;
+esac
 
 need_zapret2
 while :; do hdr

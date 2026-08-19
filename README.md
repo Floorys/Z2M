@@ -36,12 +36,16 @@
 
 ## Установка
 
+Одной командой по SSH:
+
 ```sh
-cd /tmp
-wget -O z2m.zip https://github.com/USER/zapret2-manager/archive/refs/heads/main.zip
-unzip z2m.zip
-cd zapret2-manager-main
-sh install.sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/YOURNICK/zapret2-manager/main/install.sh)"
+```
+
+Если curl не установлен (чистый OpenWrt):
+
+```sh
+sh -c "$(wget -qO- https://raw.githubusercontent.com/YOURNICK/zapret2-manager/main/install.sh)"
 ```
 
 Затем запуск:
@@ -50,7 +54,26 @@ sh install.sh
 z2m
 ```
 
-Удаление: меню → 8) Системное меню → 7) удалить менеджер.
+Обновление: `z2m update` или меню → 8) Системное меню → 6).
+Удаление: меню → 8) Системное меню → 8) удалить менеджер.
+
+Ставится: `/usr/bin/z2m`, `/opt/z2m/lib/port.awk`, `/opt/z2m/strategies/*.txt`.
+Установщик умеет и локальный режим (`sh install.sh` из распакованной папки), и сетевой
+(`install.sh --remote`), список файлов берёт из `manifest.txt`. При проблемах с HTTPS сам
+доставляет `ca-bundle`.
+
+### Команды без меню
+
+```sh
+z2m apply /root/strategy.txt   # применить стратегию Zapret2UI
+z2m test  /root/strategy.txt   # показать, во что она превратится
+z2m back                       # откат к последнему бэкапу
+z2m st                         # короткий статус + счётчики очереди
+z2m update                     # обновиться с GitHub
+```
+
+> Перед первым коммитом замени заглушку на свой ник:
+> `sed -i 's/YOURNICK/твой-ник/g' install.sh z2m README.md`
 
 ---
 
@@ -149,12 +172,15 @@ z2m
 ```
 zapret2-manager/
 ├── z2m                  # меню -> /usr/bin/z2m
-├── install.sh
+├── install.sh           # локальная и сетевая установка + self-update
+├── manifest.txt         # список файлов для сетевой установки
 ├── lib/port.awk         # конвертер winws2 -> UCI
 ├── strategies/*.txt     # пресеты
 ├── README.md
 └── LICENSE
 ```
+
+Добавил новый пресет — допиши его строку в `manifest.txt`, иначе `z2m update` его не подтянет.
 
 Файлы и пути на роутере: `/opt/z2m/`, `/usr/bin/z2m`, бэкап `/root/z2m.bak`,
 временные `/tmp/z2m.in`, `/tmp/z2m.uci`.
