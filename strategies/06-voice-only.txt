@@ -1,0 +1,5 @@
+# Только голос Discord (когда текст работает, а звонки нет)
+{WF_UDP}
+--blob=quic_google:@{FILES}\fake\quic_initial_www_google_com.bin
+--filter-udp=19294-19344,50000-65535 --filter-l7=discord,stun
+--lua-desync=fake:blob=quic_google:ip_autottl=-2,3-20:repeats=6

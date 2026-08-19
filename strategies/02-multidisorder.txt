@@ -1,0 +1,32 @@
+# Multidisorder без fake (Flowseal-подобная)
+{WF_TCP}
+{WF_UDP}
+--ipcache-lifetime=8400
+--ipcache-hostname=1
+--blob=quic_google:@{FILES}\fake\quic_initial_www_google_com.bin
+--filter-tcp=443-65535 --filter-l7=tls {HOSTLIST:discord}
+--out-range=-d10 --payload=tls_client_hello
+--lua-desync=multidisorder:pos=1,host+2,sld+2,sld+5,sniext+1,sniext+2,endhost-2
+--new
+--filter-tcp=443-65535 --filter-l7=tls {HOSTLIST:youtube}
+--out-range=-d10 --payload=tls_client_hello
+--lua-desync=multidisorder:pos=1,host+2,sld+2,sld+5,sniext+1,sniext+2,endhost-2
+--new
+--filter-tcp=443-65535 --filter-l7=tls {EXCLUDE:exclude}
+--out-range=-d10 --payload=tls_client_hello
+--lua-desync=multidisorder:pos=1,host+2,sld+2,sld+5,sniext+1,sniext+2,endhost-2
+--new
+--filter-udp=443-65535 --filter-l7=quic {HOSTLIST:youtube}
+--payload=quic_initial
+--lua-desync=fake:blob=quic_google:repeats=11
+--new
+--filter-udp=443-65535 --filter-l7=quic {HOSTLIST:discord}
+--payload=quic_initial
+--lua-desync=fake:blob=quic_google:repeats=11
+--new
+--filter-udp=443-65535 --filter-l7=quic {EXCLUDE:exclude}
+--payload=quic_initial
+--lua-desync=fake:blob=fake_default_quic:repeats=6
+--new
+--filter-udp=19294-19344,50000-65535 --filter-l7=discord,stun
+--lua-desync=fake:blob=quic_google:ip_autottl=-2,3-20:repeats=2
